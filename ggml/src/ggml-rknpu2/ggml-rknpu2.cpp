@@ -488,9 +488,12 @@ static enum ggml_status ggml_backend_rknpu_graph_compute(ggml_backend_t backend,
             continue;
         }
 
-        // Using next power of two for M for efficient caching
+        // M bucketing: pow2 up to 128, then ceil-to-128 for larger M.
+        // Avoids next_power_of_two doubling waste at large prefill (300->512, 700->1024).
         int M_op = M;
-        if (M > 1) {
+        if (M > 128) {
+            M_op = ((M + 127) / 128) * 128;
+        } else if (M > 1) {
             M_op = rknpu2_calibration::next_power_of_two(M);
         }
 
