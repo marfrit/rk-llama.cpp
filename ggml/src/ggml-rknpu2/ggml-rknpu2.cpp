@@ -647,15 +647,24 @@ static enum ggml_status ggml_backend_rknpu_graph_compute(ggml_backend_t backend,
                 const int row_stride = (int)(src1->nb[1] / sizeof(float));
                 void* dst_base = mem_A_shared->virt_addr;
 
+                // Per-thread reusable scratch to avoid malloc/free per row.
+                const int a_prep_threads = omp_get_max_threads();
+                std::vector<std::vector<float>> ready_row_pool(a_prep_threads);
+                std::vector<std::vector<float>> signed_row_pool(a_prep_threads);
+                std::vector<std::vector<float>> hadamard_row_pool(a_prep_threads);
+
                 #pragma omp parallel for if(M >= 8)
                 for (int m = 0; m < M; ++m) {
                     const float* src_row = x + (size_t)m * row_stride;
-                    std::vector<float> ready_row(K_seg_op);
+                    std::vector<float>& ready_row = ready_row_pool[omp_get_thread_num()];
+                    ready_row.resize(K_seg_op);
 
                     // Applying Hadamard Transform
                     if (is_hadamard) {
-                        std::vector<float> signed_row(K);
-                        std::vector<float> full_hadamard_row(K_op);
+                        std::vector<float>& signed_row = signed_row_pool[omp_get_thread_num()];
+                        signed_row.resize(K);
+                        std::vector<float>& full_hadamard_row = hadamard_row_pool[omp_get_thread_num()];
+                        full_hadamard_row.resize(K_op);
                         for(int k=0; k<K; ++k) signed_row[k] = src_row[k] * s_vec[k];
                         rknpu2_calibration::hadamard_transform(full_hadamard_row.data(), signed_row.data(), K, K_op);
 
