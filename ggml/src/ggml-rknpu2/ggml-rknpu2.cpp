@@ -647,7 +647,7 @@ static enum ggml_status ggml_backend_rknpu_graph_compute(ggml_backend_t backend,
                 const int row_stride = (int)(src1->nb[1] / sizeof(float));
                 void* dst_base = mem_A_shared->virt_addr;
 
-                #pragma omp parallel for
+                #pragma omp parallel for if(M >= 8)
                 for (int m = 0; m < M; ++m) {
                     const float* src_row = x + (size_t)m * row_stride;
                     std::vector<float> ready_row(K_seg_op);
@@ -738,7 +738,7 @@ static enum ggml_status ggml_backend_rknpu_graph_compute(ggml_backend_t backend,
 
                 const float hadamard_divisor = pipeline->use_hadamard ? (float)K_op : 1.0f;
 
-                #pragma omp parallel for
+                #pragma omp parallel for if(M >= 8)
                 for (int m = 0; m < M; m++) {
                     // Handling types and quantizations
                     switch (pipeline->npu_type_c) {
