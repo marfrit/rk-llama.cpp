@@ -546,9 +546,15 @@ static enum ggml_status ggml_backend_rknpu_graph_compute(ggml_backend_t backend,
             b_domain_id = it->second.iommu_domain_id;
         }
 
-        // Cleaning the C-matrix buffer
+        // Cleaning the C-matrix buffer.
+        // Accumulation is only real across K-segments; N-segments write disjoint
+        // N ranges. With a single K-segment each dst element is written exactly
+        // once, so the zero-fill and the read-modify-write below are dead work.
+        const bool single_k_segment = (all_k_segments.size() == 1);
         float* dst_data = (float*)get_tensor_real_ptr(dst);
-        memset(dst_data, 0, (size_t)M * N * sizeof(float));
+        if (!single_k_segment) {
+            memset(dst_data, 0, (size_t)M * N * sizeof(float));
+        }
 
         // Acquiring the Hadamard vector
         std::vector<float> s_vec;
@@ -747,8 +753,10 @@ static enum ggml_status ggml_backend_rknpu_graph_compute(ggml_backend_t backend,
                                 float* dst_ptr = dst_data + (size_t)m * N + N_offset;
                                 float* src_ptr = src_segment_base + (size_t)m * N_segment;
 
-                                for(int n=0; n<N_segment; ++n) {
-                                    dst_ptr[n] += src_ptr[n] * dequant_scale;
+                                if (single_k_segment) {
+                                    for(int n=0; n<N_segment; ++n) dst_ptr[n]  = src_ptr[n] * dequant_scale;
+                                } else {
+                                    for(int n=0; n<N_segment; ++n) dst_ptr[n] += src_ptr[n] * dequant_scale;
                                 }
                             }
                             break;
@@ -764,8 +772,10 @@ static enum ggml_status ggml_backend_rknpu_graph_compute(ggml_backend_t backend,
                                 float* dst_ptr = dst_data + (size_t)m * N + N_offset;
                                 int32_t* src_ptr = (int32_t*)mem_C_segments[idx]->virt_addr + (size_t)m * N_segment;
 
-                                for(int n=0; n<N_segment; ++n) {
-                                    dst_ptr[n] += (float)src_ptr[n] * dequant_scale;
+                                if (single_k_segment) {
+                                    for(int n=0; n<N_segment; ++n) dst_ptr[n]  = (float)src_ptr[n] * dequant_scale;
+                                } else {
+                                    for(int n=0; n<N_segment; ++n) dst_ptr[n] += (float)src_ptr[n] * dequant_scale;
                                 }
                             }
                             break;
@@ -781,8 +791,10 @@ static enum ggml_status ggml_backend_rknpu_graph_compute(ggml_backend_t backend,
                                 float* dst_ptr = dst_data + (size_t)m * N + N_offset;
                                 int16_t* src_ptr = (int16_t*)mem_C_segments[idx]->virt_addr + (size_t)m * N_segment;
 
-                                for(int n=0; n<N_segment; ++n) {
-                                    dst_ptr[n] += (float)src_ptr[n] * dequant_scale;
+                                if (single_k_segment) {
+                                    for(int n=0; n<N_segment; ++n) dst_ptr[n]  = (float)src_ptr[n] * dequant_scale;
+                                } else {
+                                    for(int n=0; n<N_segment; ++n) dst_ptr[n] += (float)src_ptr[n] * dequant_scale;
                                 }
                             }
                             break;
