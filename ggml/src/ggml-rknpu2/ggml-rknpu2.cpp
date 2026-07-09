@@ -958,6 +958,9 @@ static void dequantize_row(
     } else if (tensor->type == GGML_TYPE_Q4_0) {
         const block_q4_0* src = (const block_q4_0*)raw_data;
         dequantize_row_q4_0(src + (size_t)n * (K / QK4_0), row_out, K);
+    } else if (tensor->type == GGML_TYPE_Q4_K) {
+        const block_q4_K* src = (const block_q4_K*)raw_data;
+        dequantize_row_q4_K(src + (size_t)n * (K / QK_K), row_out, K);
     } else {
         GGML_ASSERT(false && "Unsupported weight type for NPU pipeline");
     }

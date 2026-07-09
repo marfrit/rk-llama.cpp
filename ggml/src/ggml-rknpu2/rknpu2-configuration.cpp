@@ -212,6 +212,7 @@ Rknpu2ConfigManager::Rknpu2ConfigManager() {
     rk3588_config.default_patterns[(int)GGML_TYPE_Q8_0] = {"W8A8_STANDARD"};
     rk3588_config.default_patterns[(int)GGML_TYPE_Q6_K] = {"W8A8_STANDARD", "W4A4_HADAMARD"};
     rk3588_config.default_patterns[(int)GGML_TYPE_Q4_0] = {"W4A4_HADAMARD"};
+    rk3588_config.default_patterns[(int)GGML_TYPE_Q4_K] = {"W4A4_HADAMARD"};
 
     device_configs["RK3588"] = rk3588_config;
 
