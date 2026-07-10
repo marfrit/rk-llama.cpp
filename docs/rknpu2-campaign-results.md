@@ -313,6 +313,26 @@ Q4_K_M (6.62 GiB) via the int4 pipelines, A76-pinned, quiet host:
   = identical to the 11.78 GiB Q8_0. File size is irrelevant; NPU-buffer bytes/weight is decisive.
 - int4 decode +74% (halved bytes help) but prefill 6.7× SLOWER — decode-only even if numerics fixed.
 
+### int4 is dead at the HARDWARE level (2026-07-10, closed)
+Probed which matmul dtypes RK3588 supports (`rknn_matmul_create`, layout-independent):
+
+| dtype | supported |
+|-------|-----------|
+| W8A8 int8×int8 | ✅ |
+| W4A4 int4×int4 | ✅ |
+| W8A4 int8×int4 (weight-only) | ❌ `unsupported ... in this platform` |
+| W16A4 fp16×int4 (weight-only) | ❌ |
+| int8×int4→fp16, fp16×int8 | ❌ |
+
+**There is NO weight-only int4 mode on RK3588.** Every dtype pairing int4 weights with
+higher-precision activations — how all practical LLM int4 quant works — is rejected by the
+hardware. The only int4 mode is W4A4, which forces **int4 activations**; transformer
+activation outliers can't be represented in 4 bits → the garbage we measured. Per-channel
+*weight* scaling can't fix it (the problem is the activations). **The "fewer bytes" lever is
+closed: you cannot halve weight bytes via int4 on this silicon.** (Clean-room all-ones
+arithmetic probe was confounded by native B layout — the W8A8 control also failed — so it's
+not cited; the create-support probe above is layout-independent and definitive.)
+
 ## Kernel / driver survey — no marginal wins there (2026-07-10)
 
 - **IOMMU domain switching:** ~10.7 switches/forward-pass (6 domains, the NPU's 4 GB windows).
