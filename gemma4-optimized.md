@@ -49,14 +49,14 @@ Non-obvious, all load-bearing:
 
 ## Measurements (this version, `02a883fea`)
 
-`llama-bench`, `taskset -c 4-7`, `-t 4 -r 2`, no speculation:
+`llama-bench`, `taskset -c 4-7`, `-t 4 -r 3`, no speculation, host idle:
 
 | backend | pp512 | tg128 |
 |---------|------:|------:|
-| CPU only (`LLAMA_RKNPU2=OFF`) | 8.74 ± 0.00 | 1.92 ± 0.00 |
-| RKNPU (model only)            | 38.31 ± 0.04 | 2.35 ± 0.00 |
+| CPU only (`LLAMA_RKNPU2=OFF`) |  8.70 ± 0.01 | 1.91 ± 0.00 |
+| RKNPU (model only)            | 38.31 ± 0.03 | 2.35 ± 0.00 |
 
-NPU: **4.4× prefill**, **+22% decode**. Decode gains little because it is memory-bandwidth
+Taken on an idle host (`-r 3`). NPU: **4.4× prefill**, **+23% decode**. Decode gains little because it is memory-bandwidth
 bound, not compute bound — which is what makes speculation the real decode lever.
 
 `llama-server`, `-c 8192`, `temp 0`, distinct prompts, decode t/s:
