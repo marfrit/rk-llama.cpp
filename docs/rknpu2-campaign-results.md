@@ -351,6 +351,40 @@ Standalone C client on `rknn_matmul_api.h` + `librknnrt` (int8, timing only `rkn
   decode, but prefill is 20% serial CPU). K>8192 to one context is catastrophic → our manual
   K-segmentation is correct and necessary.
 
+## E8 — prefill CPU/NPU pipelining: NEGATIVE (DDR-bandwidth-bound, 2026-07-10)
+
+Prefill is ~22% CPU-serial (prepA quantize + collectC dequant) around the NPU run
+(Amdahl from core-scaling 18.28→38.13 = 2.09×). Idea: chunk M and overlap the CPU
+prep of chunk c+1 with the NPU run of chunk c. Ceiling ~1.28× prefill (less e2e:
+O(M²) attention isn't pipelined). Designed with the rknpu-specialist; implemented as
+a 2-stage M-chunk software pipeline (double-buffered A/C, one context set, NPU run on
+a `std::thread` worker so a concurrent OMP team can't serialize it).
+
+**Correct but flat.** Greedy output byte-identical to the non-pipeline build. pp512
+38.10 → 37.5–37.8 (all power-of-2 chunks); pp2048 (deep 8-chunk) 26.54 → 26.36. No
+gain at any chunk depth. (`kChunkM=192` → 29.5 is self-inflicted: `next_power_of_two(192)=256`
+context padding wastes 1.5× NPU rows. Power-of-2 chunks have `ctx_M==kChunkM`, no waste.)
+
+**Why (measured, not inferred):** timed the CPU-prep section with the NPU running vs idle.
+
+| CPU-prep section | mean |
+|------------------|-----:|
+| NPU idle (overlap off) | ~1973 µs |
+| NPU running (overlap on) | ~2827 µs (**+43%**) |
+
+`bind` cost ~100 µs either way (negligible — not the per-chunk bind tax). The overlap
+*happens*, but the CPU-prep runs **43% slower while the NPU streams weights**, because
+both contend for DDR. The inflation ≈ the time the overlap saves → net flat, by physics.
+`rknn_matmul_run` does NOT busy-poll (A76 cores 96–100% idle during pure matmul) — the
+cores are free, but the **bus is not**. Idle cores ≠ idle bandwidth.
+
+**Verdict: no-go, reverted.** A 2-context-set rewrite would fix the bind tax but not the
+bandwidth wall, so it can't help. Branch `perf-prefill-pipeline` kept local/unpushed as a
+correct reference; not merged. This is the campaign's through-line closing: decode
+(bandwidth), GEMM ceiling 30.5% (bandwidth), prefill overlap (bandwidth) — **no idle DDR
+bandwidth on RK3588 to exploit.** Only levers left: fewer bytes (int4, broken) or fewer
+passes (MTP, shipped).
+
 ## Campaign verdict — decode levers
 
 Decode (~2.6→3.35 t/s) is bandwidth + CPU-tail bound; the NPU can't be the lever there.
