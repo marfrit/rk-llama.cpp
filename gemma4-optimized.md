@@ -1,7 +1,9 @@
 # Gemma 4 12B on the RK3588 NPU — optimized serving config
 
-Branch `mtp-b9549` (upstream b9570 + RKNPU2 backend + perf work). Host: boltzmann, RK3588,
-31 GiB RAM, 4× A76 (cpu4-7) + 4× A55 (cpu0-3).
+Branch `mtp-b9549` (upstream b9570 + RKNPU2 backend + perf work).
+
+Hardware: Radxa ROCK 5 ITX+ (Rockchip RK3588), 32 GB RAM, 4× Cortex-A76 (cpu4-7) +
+4× Cortex-A55 (cpu0-3), vendor NPU via `librknnrt`.
 
 ## Models
 
@@ -25,10 +27,10 @@ in-process alongside the matching target.
 Type=simple
 LimitNOFILE=65536
 CPUAffinity=4-7
-WorkingDirectory=/home/mfritsche/npu
-ExecStart=/home/mfritsche/src/rk-llama.cpp/build-mtp/bin/llama-server \
-     -m /home/mfritsche/models/gemma-4-12b-it-Q8_0.gguf \
-     -md /home/mfritsche/models/mtp-gemma-4-12b-it-Q8_0.gguf \
+WorkingDirectory=%h
+ExecStart=%h/src/rk-llama.cpp/build-mtp/bin/llama-server \
+     -m %h/models/gemma-4-12b-it-Q8_0.gguf \
+     -md %h/models/mtp-gemma-4-12b-it-Q8_0.gguf \
      --spec-type draft-mtp --spec-draft-n-max 4 \
      --alias gemma-4-12b-q8 \
      -c 131072 -t 4 \
@@ -36,6 +38,8 @@ ExecStart=/home/mfritsche/src/rk-llama.cpp/build-mtp/bin/llama-server \
 Restart=on-failure
 TimeoutStartSec=300
 ```
+
+(`%h` is the systemd specifier for the service user home directory.)
 
 Build: `cmake -B build-mtp -DLLAMA_RKNPU2=ON -DGGML_NATIVE=ON -DGGML_OPENMP=ON`.
 
@@ -105,4 +109,5 @@ prompt-lookup — it reads a static cache file (`-lcs`) and drafts from an empty
   `max_tokens` returns an empty `content` — that is not a failure. Benchmarks of copy behaviour
   need `--reasoning-budget 0`.
 - Tool calls work without `--jinja` (the gguf carries a template with tool support).
-- Rollback: `perf-rknpu2` + `build/` + `llama-server-ornith-npu.service` are preserved.
+- Rollback: branch `perf-rknpu2` and a non-MTP `build/` tree are the fallback; the backend
+  there is identical minus speculation.
