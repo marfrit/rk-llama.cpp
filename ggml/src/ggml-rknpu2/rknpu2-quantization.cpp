@@ -26,7 +26,11 @@ void convert_fp32_to_fp16(const float * src, uint16_t * dst, size_t n_elements) 
 void quantize_fp32_to_int8(const float * src, int8_t * dst, size_t n_elements, float scale) {
     const float iscale = (scale == 0.0f) ? 0.0f : 1.0f / scale;
     for (size_t i = 0; i < n_elements; ++i) {
-        dst[i] = (int8_t)roundf(src[i] * iscale);
+        // Saturate. scale = amax/127 should keep |v| <= 127, but one ULP of error in
+        // iscale can round to 128, which wraps to -128 and injects a sign-flipped
+        // outlier. The int4 path below already clamps.
+        const float v = roundf(src[i] * iscale);
+        dst[i] = (int8_t)std::max(-127.0f, std::min(127.0f, v));
     }
 }
 
