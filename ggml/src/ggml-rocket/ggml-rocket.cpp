@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <pthread.h>
 
 extern "C" {
 #include "librocket.h"
@@ -41,9 +42,10 @@ extern "C" {
 #define ROCKET_TILE_N 128
 #define ROCKET_K_MAX  8192
 #define ROCKET_MIN_BATCH 32   // below this, CPU wins (decode is bandwidth-bound)
+#define ROCKET_NFD 3          // one fd/entity caps at 2 NPU cores (DRM sched tie-break); use 3 for all cores
 
 struct ggml_backend_rocket_context {
-    int fd = -1;
+    int fd[ROCKET_NFD] = { -1, -1, -1 };
     // reusable scratch (grown as needed, never shrunk)
     std::vector<float>   wf;   // dequantized weight plane [N*K]
     std::vector<uint8_t> aq;   // quantized activations    [M*K]
@@ -58,6 +60,20 @@ static inline uint8_t rocket_q8(float v, float inv_s) {
     if (q >  127) q =  127;
     if (q < -127) q = -127;
     return (uint8_t)(q + 128); // symmetric int8 stored as uint8, zp=128
+}
+
+struct rkt_thread_arg {
+    int fd; const uint8_t *X, *Wc; uint32_t M, N, K;
+    float in_scale, out_scale; const float *out_scales;
+    uint32_t col_start, col_num; uint8_t *Y; int rc;
+};
+static void * rkt_thread_fn(void *a) {
+    struct rkt_thread_arg *t = (struct rkt_thread_arg *)a;
+    t->rc = rkt_npu_matmul(t->fd, t->X, t->Wc, NULL, t->M, t->N, t->K,
+                           128, 128, 128, t->in_scale, 1.0f, t->out_scale,
+                           t->out_scales, ROCKET_TILE_M, ROCKET_TILE_N,
+                           t->col_start, t->col_num, t->Y);
+    return NULL;
 }
 
 static void ggml_backend_rocket_mul_mat(ggml_backend_rocket_context * ctx, struct ggml_tensor * dst) {
@@ -168,16 +184,29 @@ static void ggml_backend_rocket_mul_mat(ggml_backend_rocket_context * ctx, struc
                 }
             }
 
-            static const bool dbg = getenv("GGML_ROCKET_DEBUG") != NULL;
-            if (dbg) fprintf(stderr, "[rocket] mul_mat M=%lld N=%lld K=%lld plane(%lld,%lld) type=%s ...",
-                             (long long)M, (long long)N, (long long)K,
-                             (long long)i12, (long long)i13, ggml_type_name(type)), fflush(stderr);
-            int rc = rkt_npu_matmul(ctx->fd, ctx->aq.data(), ctx->wq.data(), NULL,
-                                    (uint32_t)M, (uint32_t)N, (uint32_t)K,
-                                    128, 128, 128,
-                                    a_scale, 1.0f, out_scale, ctx->os.data(),
-                                    ROCKET_TILE_M, ROCKET_TILE_N, ctx->yq.data());
-            if (dbg) fprintf(stderr, " rc=%d\n", rc);
+            // Split N columns across ROCKET_NFD fds == NPU cores (a single fd
+            // caps at 2 cores via the DRM sched tie-break). Column ranges are
+            // TILE_N-aligned so the per-tile weight-scale blocks don't split.
+            pthread_t th[ROCKET_NFD];
+            struct rkt_thread_arg ta[ROCKET_NFD];
+            uint32_t per = ((uint32_t)N + ROCKET_NFD - 1) / ROCKET_NFD;
+            per = ((per + ROCKET_TILE_N - 1) / ROCKET_TILE_N) * ROCKET_TILE_N;
+            int nth = 0;
+            for (int fdi = 0; fdi < ROCKET_NFD; fdi++) {
+                uint32_t c0 = (uint32_t)fdi * per;
+                if (c0 >= (uint32_t)N) break;
+                uint32_t cn = (c0 + per <= (uint32_t)N) ? per : ((uint32_t)N - c0);
+                ta[nth] = (struct rkt_thread_arg){ ctx->fd[fdi], ctx->aq.data(),
+                    ctx->wq.data(), (uint32_t)M, (uint32_t)N, (uint32_t)K,
+                    a_scale, out_scale, ctx->os.data(), c0, cn, ctx->yq.data(), 0 };
+                pthread_create(&th[nth], NULL, rkt_thread_fn, &ta[nth]);
+                nth++;
+            }
+            int rc = 0;
+            for (int i = 0; i < nth; i++) {
+                pthread_join(th[i], NULL);
+                if (ta[i].rc) rc = ta[i].rc;
+            }
             GGML_ASSERT(rc == 0 && "rkt_npu_matmul failed");
 
             // --- dequantize int8 result into dst (F32) ---
@@ -260,14 +289,16 @@ static ggml_guid_t ggml_backend_rocket_guid(void) {
 }
 
 ggml_backend_t ggml_backend_rocket_init(void) {
-    int fd = rocket_open("/dev/accel/accel0");
-    if (fd < 0) {
-        GGML_LOG_ERROR("%s: failed to open /dev/accel/accel0 (%d)\n", __func__, fd);
-        return NULL;
-    }
-
     ggml_backend_rocket_context * ctx = new ggml_backend_rocket_context;
-    ctx->fd = fd;
+    for (int i = 0; i < ROCKET_NFD; i++) {
+        int fd = rocket_open("/dev/accel/accel0");
+        if (fd < 0) {
+            GGML_LOG_ERROR("%s: failed to open /dev/accel/accel0 (%d)\n", __func__, fd);
+            delete ctx;
+            return NULL;
+        }
+        ctx->fd[i] = fd;
+    }
 
     ggml_backend_t backend = new ggml_backend {
         /* .guid    = */ ggml_backend_rocket_guid(),

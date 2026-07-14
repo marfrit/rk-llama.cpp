@@ -30,6 +30,7 @@ int rkt_npu_matmul(int fd, const uint8_t *X, const uint8_t *Wc,
 		   const int32_t *bias, uint32_t M, uint32_t N, uint32_t K,
 		   uint8_t izp, uint8_t wzp, uint8_t ozp,
 		   float in_scale, float wt_scale, float out_scale, const float *out_scales,
-		   uint32_t tile_m, uint32_t tile_n, uint8_t *Y);
+		   uint32_t tile_m, uint32_t tile_n,
+		   uint32_t col_start, uint32_t col_num, uint8_t *Y);
 
 #endif /* RKT_NPU_MATMUL_H */

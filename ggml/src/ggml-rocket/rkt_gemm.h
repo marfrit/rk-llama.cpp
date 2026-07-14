@@ -28,6 +28,7 @@ struct rkt_gemm_tile {
  * rkt_gemm_op_fits() to confirm a tile actually fits one rocket op.
  */
 int rkt_gemm_plan(uint32_t M, uint32_t N, uint32_t tile_m, uint32_t tile_n,
+		  uint32_t col_start, uint32_t col_num,
 		  struct rkt_gemm_tile *tiles, int max_tiles);
 
 /* True (1) if an m x n, full-k matmul fits a single rocket op. */

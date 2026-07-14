@@ -83,8 +83,6 @@ static unsigned calc_weights_banks(const struct op *o)
 	return banks;
 }
 
-int rkt_g_task_num = 0;   /* experiment: CBUF weight-reuse multi-task chaining */
-
 int rkt_build_matmul_regcmd_scaled(uint64_t *out, int out_capacity,
 			    uint32_t M, uint32_t N, uint32_t K,
 			    uint64_t input_dma, uint64_t weights_dma,
@@ -93,7 +91,7 @@ int rkt_build_matmul_regcmd_scaled(uint64_t *out, int out_capacity,
 			    int32_t weight_zero_point,
 			    int32_t output_zero_point,
 			    float input_scale, float weights_scale,
-			    float output_scale, uint64_t bias_dma)
+			    float output_scale, uint64_t bias_dma, int task_num)
 {
 	if (M == 0 || N == 0 || K == 0)
 		return -1;
@@ -210,7 +208,7 @@ int rkt_build_matmul_regcmd_scaled(uint64_t *out, int out_capacity,
 	c.reuse_weights_cbuf = reuse_weights_cbuf;
 	c.addition_input = o.addition_input;
 	c.add_tensor = o.add_tensor;
-	c.task_num = rkt_g_task_num;
+	c.task_num = task_num;
 
 	/* ---- CORE/DPU/PC params ---- */
 	struct coredpu_params d;
@@ -260,5 +258,5 @@ int rkt_build_matmul_regcmd(uint64_t *out, int out_capacity,
 					      input_dma, weights_dma, output_dma,
 					      input_zero_point, weight_zero_point,
 					      output_zero_point,
-					      1.0f, 1.0f, 1.0f, 0);
+					      1.0f, 1.0f, 1.0f, 0, 0);
 }

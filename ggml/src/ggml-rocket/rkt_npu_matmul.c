@@ -38,8 +38,6 @@ __attribute__((destructor)) static void rkt_prof_dump(void){
 		g_setup_ns/1e9,g_submit_ns/1e9,g_prep_ns/1e9,g_free_ns/1e9);
 }
 
-extern int rkt_g_task_num;
-
 int rkt_build_matmul_regcmd_scaled(uint64_t *out, int out_capacity,
 				   uint32_t M, uint32_t N, uint32_t K,
 				   uint64_t input_dma, uint64_t weights_dma,
@@ -47,7 +45,7 @@ int rkt_build_matmul_regcmd_scaled(uint64_t *out, int out_capacity,
 				   int32_t input_zero_point, int32_t weight_zero_point,
 				   int32_t output_zero_point,
 				   float input_scale, float weights_scale,
-				   float output_scale, uint64_t bias_dma);
+				   float output_scale, uint64_t bias_dma, int task_num);
 
 struct rkt_bo { uint32_t h; uint64_t dma, off; void *map; uint32_t sz; };
 
@@ -87,7 +85,8 @@ int rkt_npu_matmul(int fd, const uint8_t *X, const uint8_t *Wc,
 		   const int32_t *bias, uint32_t M, uint32_t N, uint32_t K,
 		   uint8_t izp, uint8_t wzp, uint8_t ozp,
 		   float in_scale, float wt_scale, float out_scale, const float *out_scales,
-		   uint32_t tile_m, uint32_t tile_n, uint8_t *Y)
+		   uint32_t tile_m, uint32_t tile_n,
+		   uint32_t col_start, uint32_t col_num, uint8_t *Y)
 {
 	int ret = -1;
 	int32_t *bias0 = NULL;
@@ -110,15 +109,15 @@ int rkt_npu_matmul(int fd, const uint8_t *X, const uint8_t *Wc,
 	uint8_t *wpk = calloc(1, max_wsz);
 	int32_t *bpk = malloc((size_t)tile_n * sizeof(int32_t));
 	struct rkt_gemm_tile *tiles = malloc(
-		((M + tile_m - 1) / tile_m) * ((N + tile_n - 1) / tile_n) *
+		((M + tile_m - 1) / tile_m) * ((col_num + tile_n - 1) / tile_n) *
 		sizeof(struct rkt_gemm_tile));
 	uint64_t *rc = malloc(4096 * sizeof(uint64_t));
 	if (!Xt || !Wt || !ipk || !wpk || !bpk || !tiles || !rc)
 		goto out;
 
-	int nt = rkt_gemm_plan(M, N, tile_m, tile_n, tiles,
+	int nt = rkt_gemm_plan(M, N, tile_m, tile_n, col_start, col_num, tiles,
 			       (int)(((M + tile_m - 1) / tile_m) *
-				     ((N + tile_n - 1) / tile_n)));
+				     ((col_num + tile_n - 1) / tile_n)));
 	if (nt <= 0)
 		goto out;
 
@@ -168,12 +167,12 @@ int rkt_npu_matmul(int fd, const uint8_t *X, const uint8_t *Wc,
 				bo_write(fd, &rin[cnt], ipk, rkt_raw_input_size(1, m, K));
 				bo_write(fd, &ro[cnt], NULL, rkt_raw_output_size(1, m, n));
 
-				rkt_g_task_num = cnt;   /* task 0 loads weights, 1+ reuse CBUF */
+				/* task 0 loads weights DDR->CBUF, tasks 1+ reuse SRAM */
 				int nw = rkt_build_matmul_regcmd_scaled(
 					rc, 4096, m, n, K, rin[cnt].dma, w.dma, ro[cnt].dma,
 					izp, wzp, ozp, in_scale, wt_scale,
-					out_scales ? out_scales[cc] : out_scale, b.dma);
-				if (nw < 0) { rkt_g_task_num = 0; goto out; }
+					out_scales ? out_scales[cc] : out_scale, b.dma, cnt);
+				if (nw < 0) goto out;
 				bo_write(fd, &rreg[cnt], rc, (unsigned)nw * sizeof(uint64_t));
 
 				tasks[cnt].regcmd = (uint32_t)rreg[cnt].dma;
@@ -182,7 +181,6 @@ int rkt_npu_matmul(int fd, const uint8_t *X, const uint8_t *Wc,
 				meta[cnt].r = r; meta[cnt].m = m; meta[cnt].n = n;
 				cnt++; t++;
 			}
-			rkt_g_task_num = 0;
 
 			struct drm_rocket_job job;
 			memset(&job, 0, sizeof job);

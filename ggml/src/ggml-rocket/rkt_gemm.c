@@ -6,22 +6,25 @@
 #include "rkt_matmul.h"
 
 int rkt_gemm_plan(uint32_t M, uint32_t N, uint32_t tile_m, uint32_t tile_n,
+		  uint32_t col_start, uint32_t col_num,
 		  struct rkt_gemm_tile *tiles, int max_tiles)
 {
 	if (M == 0 || N == 0 || tile_m == 0 || tile_n == 0)
 		return -1;
+	uint32_t col_end = col_start + col_num;
+	if (col_end > N) col_end = N;
 
 	int t = 0;
-	/* column-major: consecutive tiles share the column tile, so the weight
-	 * pack+write can be cached across all row tiles of a column. */
-	for (uint32_t c = 0; c < N; c += tile_n) {
+	/* column-major over [col_start,col_end): consecutive tiles share the column
+	 * tile (weight pack+write cached across a column's row tiles). */
+	for (uint32_t c = col_start; c < col_end; c += tile_n) {
 		for (uint32_t r = 0; r < M; r += tile_m) {
 			if (t >= max_tiles)
 				return -1;
 			tiles[t].row = r;
 			tiles[t].col = c;
 			tiles[t].m = (r + tile_m <= M) ? tile_m : (M - r);
-			tiles[t].n = (c + tile_n <= N) ? tile_n : (N - c);
+			tiles[t].n = (c + tile_n <= col_end) ? tile_n : (col_end - c);
 			t++;
 		}
 	}

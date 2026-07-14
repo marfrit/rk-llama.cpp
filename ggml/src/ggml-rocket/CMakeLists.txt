@@ -19,3 +19,6 @@ target_include_directories(ggml-rocket
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
+
+find_package(Threads REQUIRED)
+target_link_libraries(ggml-rocket PRIVATE Threads::Threads)

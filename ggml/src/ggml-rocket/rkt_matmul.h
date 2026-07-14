@@ -51,7 +51,7 @@ int rkt_build_matmul_regcmd_scaled(uint64_t *out, int out_capacity,
                             int32_t input_zero_point, int32_t weight_zero_point,
                             int32_t output_zero_point,
                             float input_scale, float weights_scale,
-                            float output_scale, uint64_t bias_dma);
+                            float output_scale, uint64_t bias_dma, int task_num);
 
 int rkt_build_matmul_regcmd(uint64_t *out, int out_capacity,
                             uint32_t M, uint32_t N, uint32_t K,
