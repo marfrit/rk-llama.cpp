@@ -75,7 +75,9 @@ std::vector<ggml_backend_buffer_type_t> & ggml_backend_cpu_get_extra_buffer_type
 
 static ggml_backend_buffer_type_t * ggml_backend_cpu_device_get_extra_buffers_type(ggml_backend_dev_t device) {
     static std::vector<ggml_backend_buffer_type_t> extra_bufts = [] {
-        std::vector<ggml_backend_buffer_type_t> bufts = ggml_backend_cpu_get_extra_buffer_types();
+        std::vector<ggml_backend_buffer_type_t> bufts;
+        if (getenv("GGML_NO_REPACK") == nullptr)   // disable CPU repack bufts for measurement
+            bufts = ggml_backend_cpu_get_extra_buffer_types();
         bufts.push_back(nullptr);
         return bufts;
     }();

@@ -352,20 +352,20 @@ static bool ggml_backend_rocket_device_supports_op(ggml_backend_dev_t dev, const
         {
             const int64_t K = src1->ne[0]; // == src0->ne[0]
             const int64_t M = op->ne[1];   // batch rows (tokens)
-
-            // Offload only when the NPU can amortise its per-tile submit
-            // overhead: decode (M=1) is bandwidth-bound and strictly faster on
-            // CPU, so keep small batches there (mirrors ggml-blas min_batch).
-            if (M < ROCKET_MIN_BATCH)             return false;
-            if (src1->type != GGML_TYPE_F32)      return false;
-            if (!ggml_is_contiguous(src0))        return false;
-            if (!ggml_is_contiguous(src1))        return false;
-            if (K <= 0 || K > ROCKET_K_MAX)       return false;
-            if (K % 16 != 0)                      return false; // feature-atomic align
-            // weight must be dequantizable to F32 (F32 src0 has no to_float
-            // trait -> leave those on the CPU backend)
-            if (ggml_get_type_traits(src0->type)->to_float == NULL) return false;
-            return true;
+            const char *why = NULL;
+            if (M < ROCKET_MIN_BATCH) why="M<min_batch";
+            else if (src1->type != GGML_TYPE_F32) why="src1!=F32";
+            else if (!ggml_is_contiguous(src0)) why="src0 noncontig";
+            else if (!ggml_is_contiguous(src1)) why="src1 noncontig";
+            else if (K <= 0 || K > ROCKET_K_MAX) why="K>Kmax";
+            else if (K % 16 != 0) why="K%16";
+            else if (ggml_get_type_traits(src0->type)->to_float == NULL) why="src0 no to_float";
+            if (getenv("GGML_ROCKET_DEBUG"))
+                fprintf(stderr, "[rocket-supp] MUL_MAT M=%lld N=%lld K=%lld src0=%s src1=%s -> %s\n",
+                        (long long)M, (long long)op->ne[0], (long long)K,
+                        ggml_type_name(src0->type), ggml_type_name(src1->type),
+                        why ? why : "OFFLOAD");
+            return why == NULL;
         }
 
         default:
@@ -373,6 +373,15 @@ static bool ggml_backend_rocket_device_supports_op(ggml_backend_dev_t dev, const
     }
 
     GGML_UNUSED(dev);
+}
+
+static bool ggml_backend_rocket_device_offload_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
+    // Tell the scheduler we want MUL_MATs even when their weights live in CPU
+    // host buffers (supports_op still does the real per-op gating). Without
+    // this the sched's op-offload path (ggml_backend_offload_op) returns false
+    // and almost nothing reaches the NPU.
+    GGML_UNUSED(dev);
+    return op->op == GGML_OP_MUL_MAT;
 }
 
 static bool ggml_backend_rocket_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
@@ -392,7 +401,7 @@ static const struct ggml_backend_device_i ggml_backend_rocket_device_i = {
     /* .buffer_from_host_ptr = */ ggml_backend_rocket_device_buffer_from_host_ptr,
     /* .supports_op          = */ ggml_backend_rocket_device_supports_op,
     /* .supports_buft        = */ ggml_backend_rocket_device_supports_buft,
-    /* .offload_op           = */ NULL,
+    /* .offload_op           = */ ggml_backend_rocket_device_offload_op,
     /* .event_new            = */ NULL,
     /* .event_free           = */ NULL,
     /* .event_synchronize    = */ NULL,
