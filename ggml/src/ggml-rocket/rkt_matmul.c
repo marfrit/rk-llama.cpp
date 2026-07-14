@@ -83,6 +83,8 @@ static unsigned calc_weights_banks(const struct op *o)
 	return banks;
 }
 
+int rkt_g_task_num = 0;   /* experiment: CBUF weight-reuse multi-task chaining */
+
 int rkt_build_matmul_regcmd_scaled(uint64_t *out, int out_capacity,
 			    uint32_t M, uint32_t N, uint32_t K,
 			    uint64_t input_dma, uint64_t weights_dma,
@@ -208,7 +210,7 @@ int rkt_build_matmul_regcmd_scaled(uint64_t *out, int out_capacity,
 	c.reuse_weights_cbuf = reuse_weights_cbuf;
 	c.addition_input = o.addition_input;
 	c.add_tensor = o.add_tensor;
-	c.task_num = 0;
+	c.task_num = rkt_g_task_num;
 
 	/* ---- CORE/DPU/PC params ---- */
 	struct coredpu_params d;

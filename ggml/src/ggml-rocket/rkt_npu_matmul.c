@@ -38,6 +38,8 @@ __attribute__((destructor)) static void rkt_prof_dump(void){
 		g_setup_ns/1e9,g_submit_ns/1e9,g_prep_ns/1e9,g_free_ns/1e9);
 }
 
+extern int rkt_g_task_num;
+
 int rkt_build_matmul_regcmd_scaled(uint64_t *out, int out_capacity,
 				   uint32_t M, uint32_t N, uint32_t K,
 				   uint64_t input_dma, uint64_t weights_dma,
@@ -89,7 +91,9 @@ int rkt_npu_matmul(int fd, const uint8_t *X, const uint8_t *Wc,
 {
 	int ret = -1;
 	int32_t *bias0 = NULL;
-	struct rkt_bo in = {0}, w = {0}, b = {0}, o = {0}, reg = {0};
+#define RKT_MAXTASKS 32
+	struct rkt_bo w = {0}, b = {0};
+	struct rkt_bo rin[RKT_MAXTASKS] = {{0}}, ro[RKT_MAXTASKS] = {{0}}, rreg[RKT_MAXTASKS] = {{0}};
 	uint8_t *got = NULL;
 	if (!bias) {
 		bias0 = calloc(N, sizeof(int32_t));
@@ -118,84 +122,101 @@ int rkt_npu_matmul(int fd, const uint8_t *X, const uint8_t *Wc,
 	if (nt <= 0)
 		goto out;
 
-	/* Per-call BO pool sized for the largest tile: reuse across every tile.
-	 * Thousands of CREATE_BO/mmap/GEM_CLOSE per call were the dominant cost
-	 * (NPU compute is a small fraction of per-tile buffer churn). */
-	if (bo_alloc(fd, &in,  rkt_raw_input_size(1, tile_m, K)) ||
-	    bo_alloc(fd, &w,   rkt_packed_weights_size(1, 1, K, tile_n)) ||
-	    bo_alloc(fd, &b,   tile_n * sizeof(int32_t)) ||
-	    bo_alloc(fd, &o,   rkt_raw_output_size(1, tile_m, tile_n)) ||
-	    bo_alloc(fd, &reg, 0x1000))
+	/* CBUF weight-reuse: chain a column's row tiles into ONE multi-task job so
+	 * only task 0 fetches the column's weights DDR->CBUF and tasks 1..k reuse
+	 * the SRAM-resident weights (CNA_CBUF_CON0_WEIGHT_REUSE). ~4x fewer weight
+	 * DMAs; tiles are column-major so a column's row tiles are contiguous. */
+	if (bo_alloc(fd, &w, rkt_packed_weights_size(1, 1, K, tile_n)) ||
+	    bo_alloc(fd, &b, tile_n * sizeof(int32_t)))
 		goto out;
+	for (int s2 = 0; s2 < RKT_MAXTASKS; s2++) {
+		if (bo_alloc(fd, &rin[s2],  rkt_raw_input_size(1, tile_m, K)) ||
+		    bo_alloc(fd, &ro[s2],   rkt_raw_output_size(1, tile_m, tile_n)) ||
+		    bo_alloc(fd, &rreg[s2], 0x1000))
+			goto out;
+	}
 	got = malloc((size_t)tile_m * tile_n);
 	if (!got)
 		goto out;
-	{
-	uint32_t ih[] = { in.h, w.h, b.h, reg.h }, oh[] = { o.h };
-	unsigned last_cc = (unsigned)-1;
 
-	for (int t = 0; t < nt; t++) {
-		unsigned r = tiles[t].row, cc = tiles[t].col;
-		unsigned m = tiles[t].m, n = tiles[t].n;
+	{
+	int t = 0;
+	while (t < nt) {
+		unsigned cc = tiles[t].col, n = tiles[t].n;
 		uint64_t _t = rkt_prof_on()?rkt_now_ns():0;
 
-		/* weights + bias depend only on the column tile: pack+write once,
-		 * reuse the (device-resident) weight BO across all row tiles. */
-		if (cc != last_cc) {
-			for (unsigned j = 0; j < n; j++)
-				memcpy(Wt + (size_t)j * K, Wc + (size_t)(cc + j) * K, K);
-			rkt_pack_weights(Wt, 1, 1, K, n, wzp, wpk);
-			bo_write(fd, &w, wpk, rkt_packed_weights_size(1, 1, K, n));
-			rkt_compute_biases(Wt, bias + cc, 1, 1, K, n, wzp, izp, bpk);
-			bo_write(fd, &b, bpk, n * sizeof(int32_t));
-			last_cc = cc;
+		for (unsigned j = 0; j < n; j++)
+			memcpy(Wt + (size_t)j * K, Wc + (size_t)(cc + j) * K, K);
+		rkt_pack_weights(Wt, 1, 1, K, n, wzp, wpk);
+		bo_write(fd, &w, wpk, rkt_packed_weights_size(1, 1, K, n));
+		rkt_compute_biases(Wt, bias + cc, 1, 1, K, n, wzp, izp, bpk);
+		bo_write(fd, &b, bpk, n * sizeof(int32_t));
+
+		/* chunk this column's row tiles into multi-task jobs of <= MAXTASKS */
+		while (t < nt && tiles[t].col == cc) {
+			struct drm_rocket_task tasks[RKT_MAXTASKS];
+			uint32_t ih[2 + 2*RKT_MAXTASKS], oh[RKT_MAXTASKS];
+			struct { unsigned r, m, n; } meta[RKT_MAXTASKS];
+			int cnt = 0, ni = 0, no = 0;
+			ih[ni++] = w.h; ih[ni++] = b.h;
+
+			while (t < nt && tiles[t].col == cc && cnt < RKT_MAXTASKS) {
+				unsigned r = tiles[t].row, m = tiles[t].m;
+				for (unsigned y = 0; y < m; y++)
+					memcpy(Xt + (size_t)y * K, X + (size_t)(r + y) * K, K);
+				rkt_pack_input(Xt, 1, m, K, izp, ipk);
+				bo_write(fd, &rin[cnt], ipk, rkt_raw_input_size(1, m, K));
+				bo_write(fd, &ro[cnt], NULL, rkt_raw_output_size(1, m, n));
+
+				rkt_g_task_num = cnt;   /* task 0 loads weights, 1+ reuse CBUF */
+				int nw = rkt_build_matmul_regcmd_scaled(
+					rc, 4096, m, n, K, rin[cnt].dma, w.dma, ro[cnt].dma,
+					izp, wzp, ozp, in_scale, wt_scale,
+					out_scales ? out_scales[cc] : out_scale, b.dma);
+				if (nw < 0) { rkt_g_task_num = 0; goto out; }
+				bo_write(fd, &rreg[cnt], rc, (unsigned)nw * sizeof(uint64_t));
+
+				tasks[cnt].regcmd = (uint32_t)rreg[cnt].dma;
+				tasks[cnt].regcmd_count = (uint32_t)nw;
+				ih[ni++] = rin[cnt].h; ih[ni++] = rreg[cnt].h; oh[no++] = ro[cnt].h;
+				meta[cnt].r = r; meta[cnt].m = m; meta[cnt].n = n;
+				cnt++; t++;
+			}
+			rkt_g_task_num = 0;
+
+			struct drm_rocket_job job;
+			memset(&job, 0, sizeof job);
+			job.tasks = (uintptr_t)tasks;
+			job.task_count = (uint32_t)cnt;
+			job.task_struct_size = sizeof(struct drm_rocket_task);
+			job.in_bo_handles = (uintptr_t)ih;
+			job.in_bo_handle_count = (uint32_t)ni;
+			job.out_bo_handles = (uintptr_t)oh;
+			job.out_bo_handle_count = (uint32_t)no;
+
+			if (rkt_prof_on()){g_setup_ns+=rkt_now_ns()-_t; _t=rkt_now_ns();}
+			int sr = rocket_submit(fd, &job, 1);
+			if (rkt_prof_on()){g_submit_ns+=rkt_now_ns()-_t; _t=rkt_now_ns();}
+			if (sr) goto out;
+			for (int i = 0; i < cnt; i++) {
+				if (rocket_prep_bo(fd, ro[i].h, rkt_deadline_ns(6000000000LL)))
+					goto out;
+				rkt_unpack_output(ro[i].map, 1, meta[i].m, meta[i].n, got);
+				for (unsigned y = 0; y < meta[i].m; y++)
+					memcpy(Y + (size_t)(meta[i].r + y) * N + cc,
+					       got + (size_t)y * meta[i].n, meta[i].n);
+			}
+			if (rkt_prof_on()){g_prep_ns+=rkt_now_ns()-_t; g_tiles += cnt;}
 		}
-
-		for (unsigned y = 0; y < m; y++)
-			memcpy(Xt + (size_t)y * K, X + (size_t)(r + y) * K, K);
-		rkt_pack_input(Xt, 1, m, K, izp, ipk);
-		bo_write(fd, &in, ipk, rkt_raw_input_size(1, m, K));
-		bo_write(fd, &o, NULL, rkt_raw_output_size(1, m, n));
-
-		int nw = rkt_build_matmul_regcmd_scaled(
-			rc, 4096, m, n, K, in.dma, w.dma, o.dma, izp, wzp, ozp,
-			in_scale, wt_scale, out_scales ? out_scales[cc] : out_scale, b.dma);
-		if (nw < 0)
-			goto out;
-		bo_write(fd, &reg, rc, (unsigned)nw * sizeof(uint64_t));
-
-		struct drm_rocket_task task = { .regcmd = (uint32_t)reg.dma,
-						.regcmd_count = (uint32_t)nw };
-		struct drm_rocket_job job;
-		memset(&job, 0, sizeof job);
-		job.tasks = (uintptr_t)&task;
-		job.task_count = 1;
-		job.task_struct_size = sizeof(struct drm_rocket_task);
-		job.in_bo_handles = (uintptr_t)ih;
-		job.in_bo_handle_count = 4;
-		job.out_bo_handles = (uintptr_t)oh;
-		job.out_bo_handle_count = 1;
-
-		if(rkt_prof_on()){g_setup_ns+=rkt_now_ns()-_t; _t=rkt_now_ns();}
-		int sr = rocket_submit(fd, &job, 1);
-		if(rkt_prof_on()){g_submit_ns+=rkt_now_ns()-_t; _t=rkt_now_ns();}
-		int wr = sr ? -1 : rocket_prep_bo(fd, o.h, rkt_deadline_ns(6000000000LL));
-		if(rkt_prof_on()){g_prep_ns+=rkt_now_ns()-_t; _t=rkt_now_ns();}
-		if (!sr && !wr) {
-			rkt_unpack_output(o.map, 1, m, n, got);
-			for (unsigned y = 0; y < m; y++)
-				memcpy(Y + (size_t)(r + y) * N + cc, got + (size_t)y * n, n);
-		}
-		if(rkt_prof_on()){g_free_ns+=rkt_now_ns()-_t; g_tiles++;}
-		if (sr || wr)
-			goto out;
 	}
 	}
-	if(rkt_prof_on()) g_calls++;
+	if (rkt_prof_on()) g_calls++;
 	ret = 0;
 out:
-	bo_free(fd, &in); bo_free(fd, &w); bo_free(fd, &b);
-	bo_free(fd, &o); bo_free(fd, &reg);
+	bo_free(fd, &w); bo_free(fd, &b);
+	for (int s2 = 0; s2 < RKT_MAXTASKS; s2++) {
+		bo_free(fd, &rin[s2]); bo_free(fd, &ro[s2]); bo_free(fd, &rreg[s2]);
+	}
 	free(got);
 	free(Xt); free(Wt); free(ipk); free(wpk); free(bpk);
 	free(tiles); free(rc); free(bias0);
