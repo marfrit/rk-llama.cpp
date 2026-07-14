@@ -12,8 +12,10 @@ int rkt_gemm_plan(uint32_t M, uint32_t N, uint32_t tile_m, uint32_t tile_n,
 		return -1;
 
 	int t = 0;
-	for (uint32_t r = 0; r < M; r += tile_m) {
-		for (uint32_t c = 0; c < N; c += tile_n) {
+	/* column-major: consecutive tiles share the column tile, so the weight
+	 * pack+write can be cached across all row tiles of a column. */
+	for (uint32_t c = 0; c < N; c += tile_n) {
+		for (uint32_t r = 0; r < M; r += tile_m) {
 			if (t >= max_tiles)
 				return -1;
 			tiles[t].row = r;

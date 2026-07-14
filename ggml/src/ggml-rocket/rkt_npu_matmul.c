@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <time.h>
@@ -24,6 +25,17 @@ static int64_t rkt_deadline_ns(int64_t rel_ns)
 	struct timespec t;
 	clock_gettime(CLOCK_MONOTONIC, &t);
 	return (int64_t)t.tv_sec * 1000000000LL + (int64_t)t.tv_nsec + rel_ns;
+}
+
+/* env-gated phase profiling (GGML_ROCKET_PROF): where does tiled-matmul time go */
+static int rkt_prof_on(void){ static int v=-1; if(v<0) v=getenv("GGML_ROCKET_PROF")?1:0; return v; }
+static uint64_t g_setup_ns,g_submit_ns,g_prep_ns,g_free_ns,g_tiles,g_calls;
+static inline uint64_t rkt_now_ns(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000000ull+t.tv_nsec; }
+__attribute__((destructor)) static void rkt_prof_dump(void){
+	if(!rkt_prof_on()) return;
+	fprintf(stderr,"[rocket-prof] calls=%lu tiles=%lu  setup=%.3fs submit=%.3fs npu_wait=%.3fs free=%.3fs\n",
+		(unsigned long)g_calls,(unsigned long)g_tiles,
+		g_setup_ns/1e9,g_submit_ns/1e9,g_prep_ns/1e9,g_free_ns/1e9);
 }
 
 int rkt_build_matmul_regcmd_scaled(uint64_t *out, int out_capacity,
@@ -50,9 +62,10 @@ static int bo_alloc(int fd, struct rkt_bo *b, uint32_t size)
 static void bo_write(int fd, struct rkt_bo *b, const void *src, unsigned n)
 {
 	rocket_prep_bo(fd, b->h, INT64_MAX);
-	memset(b->map, 0, b->sz);
 	if (src)
 		memcpy(b->map, src, n);
+	else
+		memset(b->map, 0, n);
 	rocket_fini_bo(fd, b->h);
 }
 
@@ -76,6 +89,8 @@ int rkt_npu_matmul(int fd, const uint8_t *X, const uint8_t *Wc,
 {
 	int ret = -1;
 	int32_t *bias0 = NULL;
+	struct rkt_bo in = {0}, w = {0}, b = {0}, o = {0}, reg = {0};
+	uint8_t *got = NULL;
 	if (!bias) {
 		bias0 = calloc(N, sizeof(int32_t));
 		if (!bias0)
@@ -103,47 +118,54 @@ int rkt_npu_matmul(int fd, const uint8_t *X, const uint8_t *Wc,
 	if (nt <= 0)
 		goto out;
 
+	/* Per-call BO pool sized for the largest tile: reuse across every tile.
+	 * Thousands of CREATE_BO/mmap/GEM_CLOSE per call were the dominant cost
+	 * (NPU compute is a small fraction of per-tile buffer churn). */
+	if (bo_alloc(fd, &in,  rkt_raw_input_size(1, tile_m, K)) ||
+	    bo_alloc(fd, &w,   rkt_packed_weights_size(1, 1, K, tile_n)) ||
+	    bo_alloc(fd, &b,   tile_n * sizeof(int32_t)) ||
+	    bo_alloc(fd, &o,   rkt_raw_output_size(1, tile_m, tile_n)) ||
+	    bo_alloc(fd, &reg, 0x1000))
+		goto out;
+	got = malloc((size_t)tile_m * tile_n);
+	if (!got)
+		goto out;
+	{
+	uint32_t ih[] = { in.h, w.h, b.h, reg.h }, oh[] = { o.h };
+	unsigned last_cc = (unsigned)-1;
+
 	for (int t = 0; t < nt; t++) {
 		unsigned r = tiles[t].row, cc = tiles[t].col;
 		unsigned m = tiles[t].m, n = tiles[t].n;
+		uint64_t _t = rkt_prof_on()?rkt_now_ns():0;
+
+		/* weights + bias depend only on the column tile: pack+write once,
+		 * reuse the (device-resident) weight BO across all row tiles. */
+		if (cc != last_cc) {
+			for (unsigned j = 0; j < n; j++)
+				memcpy(Wt + (size_t)j * K, Wc + (size_t)(cc + j) * K, K);
+			rkt_pack_weights(Wt, 1, 1, K, n, wzp, wpk);
+			bo_write(fd, &w, wpk, rkt_packed_weights_size(1, 1, K, n));
+			rkt_compute_biases(Wt, bias + cc, 1, 1, K, n, wzp, izp, bpk);
+			bo_write(fd, &b, bpk, n * sizeof(int32_t));
+			last_cc = cc;
+		}
 
 		for (unsigned y = 0; y < m; y++)
 			memcpy(Xt + (size_t)y * K, X + (size_t)(r + y) * K, K);
-		for (unsigned j = 0; j < n; j++)
-			memcpy(Wt + (size_t)j * K, Wc + (size_t)(cc + j) * K, K);
 		rkt_pack_input(Xt, 1, m, K, izp, ipk);
-		rkt_pack_weights(Wt, 1, 1, K, n, wzp, wpk);
-		rkt_compute_biases(Wt, bias + cc, 1, 1, K, n, wzp, izp, bpk);
-
-		struct rkt_bo in = {0}, w = {0}, b = {0}, o = {0}, reg = {0};
-		if (bo_alloc(fd, &in, rkt_raw_input_size(1, m, K)) ||
-		    bo_alloc(fd, &w, rkt_packed_weights_size(1, 1, K, n)) ||
-		    bo_alloc(fd, &b, n * sizeof(int32_t)) ||
-		    bo_alloc(fd, &o, rkt_raw_output_size(1, m, n)) ||
-		    bo_alloc(fd, &reg, 0x1000)) {
-			bo_free(fd, &in); bo_free(fd, &w); bo_free(fd, &b);
-			bo_free(fd, &o); bo_free(fd, &reg);
-			goto out;
-		}
 		bo_write(fd, &in, ipk, rkt_raw_input_size(1, m, K));
-		bo_write(fd, &w, wpk, rkt_packed_weights_size(1, 1, K, n));
-		bo_write(fd, &b, bpk, n * sizeof(int32_t));
-		bo_write(fd, &o, NULL, 0);
+		bo_write(fd, &o, NULL, rkt_raw_output_size(1, m, n));
 
 		int nw = rkt_build_matmul_regcmd_scaled(
 			rc, 4096, m, n, K, in.dma, w.dma, o.dma, izp, wzp, ozp,
 			in_scale, wt_scale, out_scales ? out_scales[cc] : out_scale, b.dma);
-		if (nw < 0) {
-			bo_free(fd, &in); bo_free(fd, &w);
-			bo_free(fd, &b); bo_free(fd, &o);
-			bo_free(fd, &reg);
+		if (nw < 0)
 			goto out;
-		}
 		bo_write(fd, &reg, rc, (unsigned)nw * sizeof(uint64_t));
 
 		struct drm_rocket_task task = { .regcmd = (uint32_t)reg.dma,
 						.regcmd_count = (uint32_t)nw };
-		uint32_t ih[] = { in.h, w.h, b.h, reg.h }, oh[] = { o.h };
 		struct drm_rocket_job job;
 		memset(&job, 0, sizeof job);
 		job.tasks = (uintptr_t)&task;
@@ -154,26 +176,27 @@ int rkt_npu_matmul(int fd, const uint8_t *X, const uint8_t *Wc,
 		job.out_bo_handles = (uintptr_t)oh;
 		job.out_bo_handle_count = 1;
 
+		if(rkt_prof_on()){g_setup_ns+=rkt_now_ns()-_t; _t=rkt_now_ns();}
 		int sr = rocket_submit(fd, &job, 1);
+		if(rkt_prof_on()){g_submit_ns+=rkt_now_ns()-_t; _t=rkt_now_ns();}
 		int wr = sr ? -1 : rocket_prep_bo(fd, o.h, rkt_deadline_ns(6000000000LL));
+		if(rkt_prof_on()){g_prep_ns+=rkt_now_ns()-_t; _t=rkt_now_ns();}
 		if (!sr && !wr) {
-			uint8_t *got = malloc((size_t)m * n);
-			if (got) {
-				rkt_unpack_output(o.map, 1, m, n, got);
-				for (unsigned y = 0; y < m; y++)
-					memcpy(Y + (size_t)(r + y) * N + cc,
-					       got + (size_t)y * n, n);
-				free(got);
-			}
+			rkt_unpack_output(o.map, 1, m, n, got);
+			for (unsigned y = 0; y < m; y++)
+				memcpy(Y + (size_t)(r + y) * N + cc, got + (size_t)y * n, n);
 		}
-		bo_free(fd, &in); bo_free(fd, &w);
-		bo_free(fd, &b); bo_free(fd, &o);
-		bo_free(fd, &reg);
+		if(rkt_prof_on()){g_free_ns+=rkt_now_ns()-_t; g_tiles++;}
 		if (sr || wr)
 			goto out;
 	}
+	}
+	if(rkt_prof_on()) g_calls++;
 	ret = 0;
 out:
+	bo_free(fd, &in); bo_free(fd, &w); bo_free(fd, &b);
+	bo_free(fd, &o); bo_free(fd, &reg);
+	free(got);
 	free(Xt); free(Wt); free(ipk); free(wpk); free(bpk);
 	free(tiles); free(rc); free(bias0);
 	return ret;
