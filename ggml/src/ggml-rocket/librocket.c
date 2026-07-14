@@ -50,6 +50,12 @@ void *rocket_mmap_bo(int fd, uint64_t mmap_offset, uint32_t size)
 		    mmap_offset);
 }
 
+void rocket_munmap_bo(void *map, uint32_t size)
+{
+	if (map && map != MAP_FAILED)
+		munmap(map, size);
+}
+
 int rocket_prep_bo(int fd, uint32_t handle, int64_t timeout_ns)
 {
 	struct drm_rocket_prep_bo prep_bo;

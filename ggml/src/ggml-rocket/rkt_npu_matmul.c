@@ -56,6 +56,18 @@ static void bo_write(int fd, struct rkt_bo *b, const void *src, unsigned n)
 	rocket_fini_bo(fd, b->h);
 }
 
+/* munmap + GEM_CLOSE a BO (safe on a zero-initialised struct). GEM_CLOSE alone
+ * leaks the mapping — the VMA keeps the object pinned until process exit. */
+static void bo_free(int fd, struct rkt_bo *b)
+{
+	if (b->map && b->map != MAP_FAILED)
+		rocket_munmap_bo(b->map, b->sz);
+	if (b->h)
+		rocket_close_bo(fd, b->h);
+	b->map = NULL;
+	b->h = 0;
+}
+
 int rkt_npu_matmul(int fd, const uint8_t *X, const uint8_t *Wc,
 		   const int32_t *bias, uint32_t M, uint32_t N, uint32_t K,
 		   uint8_t izp, uint8_t wzp, uint8_t ozp,
@@ -108,8 +120,11 @@ int rkt_npu_matmul(int fd, const uint8_t *X, const uint8_t *Wc,
 		    bo_alloc(fd, &w, rkt_packed_weights_size(1, 1, K, n)) ||
 		    bo_alloc(fd, &b, n * sizeof(int32_t)) ||
 		    bo_alloc(fd, &o, rkt_raw_output_size(1, m, n)) ||
-		    bo_alloc(fd, &reg, 0x1000))
+		    bo_alloc(fd, &reg, 0x1000)) {
+			bo_free(fd, &in); bo_free(fd, &w); bo_free(fd, &b);
+			bo_free(fd, &o); bo_free(fd, &reg);
 			goto out;
+		}
 		bo_write(fd, &in, ipk, rkt_raw_input_size(1, m, K));
 		bo_write(fd, &w, wpk, rkt_packed_weights_size(1, 1, K, n));
 		bo_write(fd, &b, bpk, n * sizeof(int32_t));
@@ -119,9 +134,9 @@ int rkt_npu_matmul(int fd, const uint8_t *X, const uint8_t *Wc,
 			rc, 4096, m, n, K, in.dma, w.dma, o.dma, izp, wzp, ozp,
 			in_scale, wt_scale, out_scales ? out_scales[cc] : out_scale, b.dma);
 		if (nw < 0) {
-			rocket_close_bo(fd, in.h); rocket_close_bo(fd, w.h);
-			rocket_close_bo(fd, b.h); rocket_close_bo(fd, o.h);
-			rocket_close_bo(fd, reg.h);
+			bo_free(fd, &in); bo_free(fd, &w);
+			bo_free(fd, &b); bo_free(fd, &o);
+			bo_free(fd, &reg);
 			goto out;
 		}
 		bo_write(fd, &reg, rc, (unsigned)nw * sizeof(uint64_t));
@@ -151,9 +166,9 @@ int rkt_npu_matmul(int fd, const uint8_t *X, const uint8_t *Wc,
 				free(got);
 			}
 		}
-		rocket_close_bo(fd, in.h); rocket_close_bo(fd, w.h);
-		rocket_close_bo(fd, b.h); rocket_close_bo(fd, o.h);
-		rocket_close_bo(fd, reg.h);
+		bo_free(fd, &in); bo_free(fd, &w);
+		bo_free(fd, &b); bo_free(fd, &o);
+		bo_free(fd, &reg);
 		if (sr || wr)
 			goto out;
 	}

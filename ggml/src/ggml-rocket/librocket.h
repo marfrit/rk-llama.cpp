@@ -48,6 +48,10 @@ int rocket_create_bo(int fd, uint32_t size, uint32_t *handle_out,
  */
 void *rocket_mmap_bo(int fd, uint64_t mmap_offset, uint32_t size);
 
+/* rocket_munmap_bo - undo rocket_mmap_bo (the VMA pins the GEM object; GEM_CLOSE
+ * alone does NOT free it, so every mmap must be paired with a munmap). */
+void rocket_munmap_bo(void *map, uint32_t size);
+
 /**
  * rocket_prep_bo - take CPU ownership of a BO (wait for NPU, sync caches)
  * @fd:         rocket device fd

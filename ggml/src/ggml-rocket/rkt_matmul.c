@@ -95,6 +95,13 @@ int rkt_build_matmul_regcmd_scaled(uint64_t *out, int out_capacity,
 {
 	if (M == 0 || N == 0 || K == 0)
 		return -1;
+	/* Hard backstop: the RK3588 int8 matmul K-limit is ~8192 (verified: correct
+	 * through 8192, catastrophic garbage at 11008). Weights exceeding CBUF are
+	 * streamed (reuse_weights_cbuf=0, emitted below) and are correct up to that
+	 * K limit, so gate on K, not on bank count. Backend supports_op also caps
+	 * this; the check here protects direct callers. */
+	if (K > 8192)
+		return -1;
 
 	struct op o = {
 		.stride = 1,

@@ -145,12 +145,26 @@ static void ggml_backend_rocket_mul_mat(ggml_backend_rocket_context * ctx, struc
             float out_scale = (wn2max * ym2max) / 127.0f;
             if (!(out_scale > 0.0f)) out_scale = 1e-6f;
 
-            for (int64_t n = 0; n < N; n++) {
-                const float inv_w = 1.0f / ctx->ws[n];
-                const float * wrow = ctx->wf.data() + (size_t)n * K;
-                uint8_t * qrow = ctx->wq.data() + (size_t)n * K;
-                for (int64_t k = 0; k < K; k++) qrow[k] = rocket_q8(wrow[k], inv_w);
-                ctx->os[n] = out_scale / ctx->ws[n];
+            // The NPU applies ONE OUT_CVT scale per op == per tile of
+            // ROCKET_TILE_N output columns. So every column in a tile must be
+            // quantized with the SAME weight scale, otherwise off-lead columns
+            // ride the tile-lead's scale and can clip. Use the tile's max
+            // per-channel scale (block boundaries must match rkt_gemm_plan's
+            // column tiling: [0,TILE_N),[TILE_N,2*TILE_N),...).
+            for (int64_t c0 = 0; c0 < N; c0 += ROCKET_TILE_N) {
+                int64_t c1 = c0 + ROCKET_TILE_N;
+                if (c1 > N) c1 = N;
+                float wsb = 0.0f;
+                for (int64_t n = c0; n < c1; n++)
+                    if (ctx->ws[n] > wsb) wsb = ctx->ws[n];
+                if (!(wsb > 0.0f)) wsb = 1e-6f;
+                const float inv_w = 1.0f / wsb;
+                for (int64_t n = c0; n < c1; n++) {
+                    const float * wrow = ctx->wf.data() + (size_t)n * K;
+                    uint8_t * qrow = ctx->wq.data() + (size_t)n * K;
+                    for (int64_t k = 0; k < K; k++) qrow[k] = rocket_q8(wrow[k], inv_w);
+                    ctx->os[n] = out_scale / wsb;
+                }
             }
 
             static const bool dbg = getenv("GGML_ROCKET_DEBUG") != NULL;
