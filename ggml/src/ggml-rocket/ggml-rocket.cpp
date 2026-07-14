@@ -40,6 +40,7 @@ extern "C" {
 #define ROCKET_TILE_M 16
 #define ROCKET_TILE_N 128
 #define ROCKET_K_MAX  8192
+#define ROCKET_MIN_BATCH 32   // below this, CPU wins (decode is bandwidth-bound)
 
 struct ggml_backend_rocket_context {
     int fd = -1;
@@ -350,7 +351,12 @@ static bool ggml_backend_rocket_device_supports_op(ggml_backend_dev_t dev, const
         case GGML_OP_MUL_MAT:
         {
             const int64_t K = src1->ne[0]; // == src0->ne[0]
+            const int64_t M = op->ne[1];   // batch rows (tokens)
 
+            // Offload only when the NPU can amortise its per-tile submit
+            // overhead: decode (M=1) is bandwidth-bound and strictly faster on
+            // CPU, so keep small batches there (mirrors ggml-blas min_batch).
+            if (M < ROCKET_MIN_BATCH)             return false;
             if (src1->type != GGML_TYPE_F32)      return false;
             if (!ggml_is_contiguous(src0))        return false;
             if (!ggml_is_contiguous(src1))        return false;
