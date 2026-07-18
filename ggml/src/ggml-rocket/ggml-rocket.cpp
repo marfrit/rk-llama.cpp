@@ -384,7 +384,8 @@ static bool ggml_backend_rocket_device_supports_op(ggml_backend_dev_t dev, const
             const int64_t K = src1->ne[0]; // == src0->ne[0]
             const int64_t M = op->ne[1];   // batch rows (tokens)
             const char *why = NULL;
-            if (M < ROCKET_MIN_BATCH) why="M<min_batch";
+            static const int min_batch = (getenv("GGML_ROCKET_MIN_BATCH") ? atoi(getenv("GGML_ROCKET_MIN_BATCH")) : ROCKET_MIN_BATCH);
+            if (M < min_batch) why="M<min_batch";
             else if (src1->type != GGML_TYPE_F32) why="src1!=F32";
             else if (!ggml_is_contiguous(src0)) why="src0 noncontig";
             else if (!ggml_is_contiguous(src1)) why="src1 noncontig";
