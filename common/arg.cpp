@@ -2348,10 +2348,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
         }
     ).set_env("LLAMA_ARG_N_CPU_MOE"));
-    GGML_ASSERT(params.n_gpu_layers < 0); // string_format would need to be extended for a default >= 0
+    // NPU/accel backends (e.g. rknpu2, DEVICE_TYPE_ACCEL) may set a default n_gpu_layers >= 0,
+    // so handle that case in the help string instead of asserting a negative default.
     add_opt(common_arg(
         {"-ngl", "--gpu-layers", "--n-gpu-layers"}, "N",
-        string_format("max. number of layers to store in VRAM, either an exact number, 'auto', or 'all' (default: %s)", params.n_gpu_layers == -1 ? "auto" : "all"),
+        string_format("max. number of layers to store in VRAM, either an exact number, 'auto', or 'all' (default: %s)",
+            params.n_gpu_layers == -1 ? "auto" : (params.n_gpu_layers <= -2 ? "all" : std::to_string(params.n_gpu_layers).c_str())),
         [](common_params & params, const std::string & value) {
             if (value == "auto") {
                 params.n_gpu_layers = -1;
@@ -3616,11 +3618,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.speculative.draft.devices = parse_device_list(value);
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
-    GGML_ASSERT(params.speculative.draft.n_gpu_layers < 0); // string_format would need to be extended for a default >= 0
+    // NPU/accel backends may set a default draft n_gpu_layers >= 0; handle it in the help string.
     add_opt(common_arg(
         {"--spec-draft-ngl", "-ngld", "--gpu-layers-draft", "--n-gpu-layers-draft"}, "N",
         string_format("max. number of draft model layers to store in VRAM, either an exact number, 'auto', or 'all' (default: %s)",
-            params.speculative.draft.n_gpu_layers == -1 ? "auto" : "all"),
+            params.speculative.draft.n_gpu_layers == -1 ? "auto" : (params.speculative.draft.n_gpu_layers <= -2 ? "all" : std::to_string(params.speculative.draft.n_gpu_layers).c_str())),
         [](common_params & params, const std::string & value) {
             if (value == "auto") {
                 params.speculative.draft.n_gpu_layers = -1;
