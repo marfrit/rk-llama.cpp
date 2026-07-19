@@ -1,7 +1,7 @@
 # RKNPU2 perf campaign — results (E1–E6)
 
 Model: ornith-1.0-9b-Q8_0.gguf (Q8_0 → whole model on NPU)
-Host: boltzmann.fritz.box (RK3588). Harness: `ulimit -n 65536`, llama-bench, `-t 4`.
+Host: an RK3588 board (8× Cortex-A76/A55, LPDDR5). Harness: `ulimit -n 65536`, llama-bench, `-t 4`.
 Branch: perf-rknpu2 (base compat commit 39622ccb3).
 
 ## Throughput (t/s), baseline → each step
