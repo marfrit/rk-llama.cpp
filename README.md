@@ -12,6 +12,82 @@
 
 LLM inference in C/C++
 
+---
+
+## Rockchip-specific environment variables, parameters, and recipe
+
+> This is a Rockchip **RK3588 NPU** fork of llama.cpp. The `performance-enhancement`
+> branch is the consolidated, benchmarked state: it adds two RK3588 NPU backends plus
+> tuning knobs and benchmark docs. Base llama.cpp usage below is unchanged.
+
+### Two NPU backends (enable exactly one)
+
+| backend | build flag | kernel driver | userspace | notes |
+|---------|-----------|---------------|-----------|-------|
+| **rknpu2** | `-DLLAMA_RKNPU2=ON` | vendor BSP **or** mainline via [rkopnu](https://github.com/marfrit/rkopnu) | closed `librknnrt.so` | drives the NPU through Rockchip's runtime; fastest (vendor parity) |
+| **rocket** | `-DGGML_ROCKET=ON` | mainline `drivers/accel/rocket` | none (fully open) | open ggml backend on the mainline accel driver; ~1.33× over CPU |
+
+### Recipe — rknpu2 backend on a **mainline** kernel
+
+The fully-open kernel path running the closed runtime at vendor speed:
+
+1. **Kernel:** build + load [**rkopnu**](https://github.com/marfrit/rkopnu) (presents the
+   vendor `rknpu` ioctl ABI on a mainline kernel; blacklist the in-tree `rocket`).
+2. **Runtime:** `sudo install -m0644 librknnrt.so /usr/lib && sudo ldconfig`
+   (librknnrt ships in this tree at `ggml/src/ggml-rknpu2/libs/`).
+3. **Build:** `cmake -B build -G Ninja -DLLAMA_RKNPU2=ON -DGGML_ROCKET=OFF && ninja -C build llama-server`
+4. **Run** — raise the fd ceiling (librknnrt exports ~1500+ dmabuf fds per prefill) and pin
+   to the A76 big cluster:
+   ```sh
+   ulimit -n 65536
+   LD_LIBRARY_PATH=build/bin taskset -c 4-7 ./build/bin/llama-server \
+       -m model.gguf -c 131072 -t 4 -fit off --host 0.0.0.0 --port 8090
+   ```
+   librknnrt round-robins single-core matmuls across all three NPU cores automatically.
+
+### Environment variables
+
+**rknpu2 backend** (`ggml/src/ggml-rknpu2/`):
+
+| variable | default | effect |
+|----------|---------|--------|
+| `RKNPU_DEVICE` | `RK3588` | target SoC profile |
+| `RKNPU_CORES` | all | comma-separated NPU core indices to use, e.g. `0,1,2` |
+| `RKNPU_DOMAINS` | all | restrict which op domains offload to the NPU |
+| `RKNPU_HYBRID` | built-in | custom per-layer CPU/NPU split pattern |
+
+**rocket backend** (`ggml/src/ggml-rocket/`):
+
+| variable | default | effect |
+|----------|---------|--------|
+| `GGML_ROCKET_MIN_BATCH` | `ROCKET_MIN_BATCH` | minimum M (batch) to offload; smaller matmuls (e.g. decode, M<32) stay on CPU |
+| `GGML_ROCKET_PROF` | off | on backend teardown, dump per-matmul timing: setup / submit / npu_wait / free / tiles / calls |
+| `GGML_ROCKET_DEBUG` | off | verbose per-matmul offload-decision logging |
+| `ROCKET_NOREPACK_TENSORS` | unset | measurement only: comma-separated tensor-name substrings to force off the `CPU_REPACK` buftype so they reach the NPU. Routing *more* tensors to the NPU is generally **slower** (the CPU NEON repack kernel beats the NPU for those shapes) — for A/B experiments, not production |
+
+### Useful parameters
+
+- `-fit off` — don't auto-shrink unset args to device memory when you set `-c` explicitly.
+- `taskset -c 4-7` / `-t 4` — pin to the four A76 cores; the CPU-side quantize/repack is the
+  prefill bottleneck, so keep it off the little A55 cluster.
+
+### Benchmarks
+
+Full data in [`docs/rknpu2-campaign-results.md`](docs/rknpu2-campaign-results.md). Summary
+(gemma-4-E2B-it-Q8_0, prefill, RK3588 NPU @ 1 GHz):
+
+| stack | prefill tok/s |
+|-------|---------------|
+| CPU (NEON, A76×4) | ~34.9 |
+| rocket backend (mainline, open) | ~46–49 |
+| **rknpu2 (vendor runtime, via rkopnu on mainline)** | **~51.5** (Rock 5 ITX) / ~49.5 (CoolPi GenBook, DDR-bound) |
+
+A persistent `llama-server` at **128K context** on the rkopnu+rknpu2 path is soak-tested at
+150/150 completions with all three NPU cores balanced and no crashes. Board-to-board
+differences are DDR-bandwidth-bound, not clock.
+
+---
+
 ## Recent API changes
 
 - [Changelog for `libllama` API](https://github.com/ggml-org/llama.cpp/issues/9289)
