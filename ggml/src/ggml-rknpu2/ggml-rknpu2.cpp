@@ -296,6 +296,9 @@ struct ggml_backend_rknpu_buffer_context {
                 it->second.iommu_domain_id = g_domain_manager.assign_domain_memory(size);
                 rknn_matmul_ctx new_ctx = g_domain_manager.get_allocator_context(it->second.iommu_domain_id);
                 it->second.mem = rknn_create_mem(new_ctx, size);
+                if (it->second.mem == nullptr) {
+                    GGML_ABORT("rknpu2: rknn_create_mem failed for %zu bytes (grow re-alloc) -- the NPU's ~4 GiB IOVA aperture is exhausted; this backend maps all weights into a single 4 GiB IOMMU window. Use a quantized GGUF, or set RKNPU_HYBRID=W8A8_STANDARD for on-the-fly INT8 weights.", size);
+                }
                 it->second.size = size;
             }
             return it->second;
@@ -311,7 +314,9 @@ struct ggml_backend_rknpu_buffer_context {
         alloc.size = size;
         alloc.iommu_domain_id = domain_id;
 
-        GGML_ASSERT(alloc.mem != nullptr && "Failed to allocate tensor memory via RKNN API");
+        if (alloc.mem == nullptr) {
+            GGML_ABORT("rknpu2: rknn_create_mem failed for %zu bytes -- the NPU's ~4 GiB IOVA aperture is exhausted; this backend maps all weights into a single 4 GiB IOMMU window. Use a quantized GGUF, or set RKNPU_HYBRID=W8A8_STANDARD for on-the-fly INT8 weights.", size);
+        }
         tensor_allocs[tensor_offset] = alloc;
 
         return alloc;
